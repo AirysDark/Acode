@@ -176,6 +176,7 @@ class Settings {
 			maxRetryCount: 3,
 			showRetryToast: false,
 			showSideButtons: true,
+			showSponsorSidebarApp: true,
 			showAnnotations: false,
 			lintGutter: true,
 			rainbowBrackets: true,
@@ -184,6 +185,7 @@ class Settings {
 				servers: {},
 			},
 			developerMode: false,
+			shiftClickSelection: false,
 		};
 		this.value = structuredClone(this.#defaultSettings);
 	}
