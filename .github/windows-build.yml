@@ -1,0 +1,94 @@
+name: Windows Desktop Build (Electron)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+    # -------------------------------
+    # Checkout
+    # -------------------------------
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    # -------------------------------
+    # Setup Node
+    # -------------------------------
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 'lts/*'
+        cache: npm
+
+    # -------------------------------
+    # Install dependencies
+    # -------------------------------
+    - name: Install dependencies
+      run: npm install
+
+    - name: Install Cordova
+      run: npm install -g cordova
+
+    # -------------------------------
+    # Build frontend (IMPORTANT)
+    # -------------------------------
+    - name: Build web app (www)
+      run: |
+        npm run setup
+        npm run build
+
+    # -------------------------------
+    # Setup Electron project
+    # -------------------------------
+    - name: Create Electron wrapper
+      run: |
+        mkdir desktop
+        cd desktop
+        npm init -y
+        npm install electron electron-builder
+
+        echo const { app, BrowserWindow } = require('electron'); > main.js
+        echo const path = require('path'); >> main.js
+        echo function createWindow() { >> main.js
+        echo   const win = new BrowserWindow({ width: 1200, height: 800 }); >> main.js
+        echo   win.loadFile(path.join(__dirname, '../www/index.html')); >> main.js
+        echo } >> main.js
+        echo app.whenReady().then(createWindow); >> main.js
+
+    # -------------------------------
+    # Build EXE
+    # -------------------------------
+    - name: Build Windows EXE
+      working-directory: desktop
+      run: |
+        npx electron-builder --win
+
+    # -------------------------------
+    # Upload artifact
+    # -------------------------------
+    - name: Upload Windows EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: acode-windows-build
+        path: desktop/dist/*.exe
+
+    # -------------------------------
+    # Optional Release
+    # -------------------------------
+    - name: Create Release
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: windows-${{ github.run_number }}
+        name: Windows Build
+        files: desktop/dist/*.exe
+        prerelease: true
