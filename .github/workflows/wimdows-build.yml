@@ -1,0 +1,164 @@
+name: Windows Build (Electron - Optimized)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+    # -------------------------------
+    # Checkout
+    # -------------------------------
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # -------------------------------
+    # Setup Node (cached)
+    # -------------------------------
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: npm
+
+    # -------------------------------
+    # Install dependencies (faster)
+    # -------------------------------
+    - name: Install dependencies
+      run: npm ci
+
+    # -------------------------------
+    # Build frontend ONCE
+    # -------------------------------
+    - name: Build web (www)
+      run: |
+        npm run setup
+        npm run build
+
+    # -------------------------------
+    # Cache Electron build
+    # -------------------------------
+    - name: Cache Electron
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~\AppData\Local\electron-builder\Cache
+          ~\AppData\Local\electron\Cache
+        key: electron-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+
+    # -------------------------------
+    # Setup Electron (SECURE)
+    # -------------------------------
+    - name: Setup Electron App
+      shell: pwsh
+      run: |
+        mkdir desktop
+        cd desktop
+
+        npm init -y
+        npm install electron electron-builder --save-dev
+
+        # PRELOAD (secure bridge)
+        @"
+        const { contextBridge } = require('electron');
+
+        contextBridge.exposeInMainWorld('api', {
+          ping: () => 'pong'
+        });
+        "@ | Out-File -Encoding utf8 preload.js
+
+        # MAIN PROCESS (secure)
+        @"
+        const { app, BrowserWindow } = require('electron');
+        const path = require('path');
+
+        function createWindow() {
+          const win = new BrowserWindow({
+            width: 1200,
+            height: 800,
+            webPreferences: {
+              preload: path.join(__dirname, 'preload.js'),
+              contextIsolation: true,
+              nodeIntegration: false
+            }
+          });
+
+          win.loadFile(path.join(__dirname, '../www/index.html'));
+        }
+
+        app.whenReady().then(createWindow);
+        "@ | Out-File -Encoding utf8 main.js
+
+        # PACKAGE CONFIG (optimized)
+        @"
+        {
+          "name": "acode-desktop",
+          "version": "1.0.0",
+          "main": "main.js",
+          "scripts": {
+            "build": "electron-builder"
+          },
+          "devDependencies": {
+            "electron": "^28.0.0",
+            "electron-builder": "^24.0.0"
+          },
+          "build": {
+            "appId": "com.acode.desktop",
+            "productName": "Acode Desktop",
+            "directories": {
+              "output": "dist"
+            },
+            "files": [
+              "main.js",
+              "preload.js",
+              "../www/**/*"
+            ],
+            "compression": "maximum",
+            "asar": true,
+            "win": {
+              "target": [
+                {
+                  "target": "nsis",
+                  "arch": ["x64"]
+                }
+              ]
+            }
+          }
+        }
+        "@ | Out-File -Encoding utf8 package.json
+
+    # -------------------------------
+    # Build EXE
+    # -------------------------------
+    - name: Build EXE
+      working-directory: desktop
+      run: npm run build
+
+    # -------------------------------
+    # Upload artifact
+    # -------------------------------
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: acode-windows-exe
+        path: desktop/dist/*.exe
+
+    # -------------------------------
+    # Optional Release
+    # -------------------------------
+    - name: Release EXE
+      if: github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: windows-${{ github.run_number }}
+        name: Windows Build ${{ github.run_number }}
+        files: desktop/dist/*.exe
+        prerelease: true
