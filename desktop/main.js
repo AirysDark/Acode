@@ -8,16 +8,18 @@ const fs = require('fs');
 let mainWindow;
 
 const APP_DATA_FILE = path.join(app.getPath('userData'), 'acode.json');
-let permissions = {};
-let watchers = {};
+let permissions = new Set();
+let watchers = new Map();
 
 // -------------------------------
 // STORAGE
 // -------------------------------
 function readStore() {
   try {
+    if (!fs.existsSync(APP_DATA_FILE)) return {};
     return JSON.parse(fs.readFileSync(APP_DATA_FILE, 'utf-8'));
-  } catch {
+  } catch (e) {
+    console.error("Read store error:", e);
     return {};
   }
 }
@@ -48,6 +50,26 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow);
+
+// -------------------------------
+// HELPERS
+// -------------------------------
+function safeStat(fullPath) {
+  try {
+    const stat = fs.statSync(fullPath);
+    return {
+      size: stat.size,
+      mtime: stat.mtimeMs,
+      isDir: stat.isDirectory()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function hasPermission(targetPath) {
+  return permissions.has(targetPath);
+}
 
 // -------------------------------
 // DIALOGS
@@ -84,15 +106,25 @@ ipcMain.handle('write-file', async (_, filePath, data) => {
   }
 });
 
+ipcMain.handle('exists', async (_, p) => {
+  return fs.existsSync(p);
+});
+
+// -------------------------------
+// DIRECTORY LISTING (with metadata)
+// -------------------------------
 ipcMain.handle('read-dir', async (_, dirPath) => {
   try {
     return fs.readdirSync(dirPath).map(name => {
       const full = path.join(dirPath, name);
-      const stat = fs.statSync(full);
+      const stat = safeStat(full);
+
       return {
         name,
         path: full,
-        type: stat.isDirectory() ? 'folder' : 'file'
+        type: stat?.isDir ? 'folder' : 'file',
+        size: stat?.size || 0,
+        modified: stat?.mtime || 0
       };
     });
   } catch (e) {
@@ -101,19 +133,20 @@ ipcMain.handle('read-dir', async (_, dirPath) => {
 });
 
 // -------------------------------
-// FILE TREE (recursive explorer)
+// FILE TREE (recursive)
 // -------------------------------
 ipcMain.handle('fs-tree', async (_, dirPath) => {
   try {
     function walk(dir) {
       return fs.readdirSync(dir).map(name => {
         const full = path.join(dir, name);
-        const stat = fs.statSync(full);
+        const stat = safeStat(full);
+
         return {
           name,
           path: full,
-          type: stat.isDirectory() ? 'folder' : 'file',
-          children: stat.isDirectory() ? walk(full) : []
+          type: stat?.isDir ? 'folder' : 'file',
+          children: stat?.isDir ? walk(full) : []
         };
       });
     }
@@ -125,30 +158,31 @@ ipcMain.handle('fs-tree', async (_, dirPath) => {
 });
 
 // -------------------------------
-// PERMISSIONS
+// PERMISSIONS (improved)
 // -------------------------------
 ipcMain.handle('perm-request', async (_, type, targetPath) => {
-  permissions[targetPath] = true;
+  permissions.add(targetPath);
   return true;
 });
 
 ipcMain.handle('perm-check', async (_, targetPath) => {
-  return !!permissions[targetPath];
+  return permissions.has(targetPath);
 });
 
 // -------------------------------
-// FILE WATCHER
+// FILE WATCHER (safe + reusable)
 // -------------------------------
 ipcMain.handle('watch-file', (_, filePath) => {
   try {
-    if (watchers[filePath]) return true;
+    if (watchers.has(filePath)) return true;
 
-    watchers[filePath] = fs.watch(filePath, () => {
-      if (mainWindow) {
+    const watcher = fs.watch(filePath, { persistent: false }, () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('file-changed', filePath);
       }
     });
 
+    watchers.set(filePath, watcher);
     return true;
   } catch (e) {
     return { error: e.message };
@@ -156,9 +190,9 @@ ipcMain.handle('watch-file', (_, filePath) => {
 });
 
 ipcMain.handle('unwatch-file', (_, filePath) => {
-  if (watchers[filePath]) {
-    watchers[filePath].close();
-    delete watchers[filePath];
+  if (watchers.has(filePath)) {
+    watchers.get(filePath).close();
+    watchers.delete(filePath);
   }
   return true;
 });
@@ -187,6 +221,14 @@ ipcMain.handle('read-file-path', async (_, filePath) => {
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// -------------------------------
+// CLEANUP
+// -------------------------------
+app.on('before-quit', () => {
+  watchers.forEach(w => w.close());
+  watchers.clear();
 });
 
 // -------------------------------
