@@ -1,11 +1,36 @@
-// platform/desktop.js
+// www/js/platform/desktop.js
 
 export const platform = {
   isDesktop: typeof window !== 'undefined' && !!window.api,
 
-  // -----------------------------
+  // =============================
+  // INTERNAL HELPERS
+  // =============================
+  async ensurePermission(type, path) {
+    if (!this.isDesktop) return true;
+
+    try {
+      const allowed = await window.api.checkPermission?.(path);
+      if (allowed) return true;
+
+      return await window.api.requestPermission?.(type, path);
+    } catch (err) {
+      console.error("Permission error:", err);
+      return false;
+    }
+  },
+
+  safeJSONParse(data) {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  },
+
+  // =============================
   // FILE OPERATIONS
-  // -----------------------------
+  // =============================
   async openFile() {
     if (!this.isDesktop) return null;
 
@@ -13,13 +38,16 @@ export const platform = {
       const filePath = await window.api.openFileDialog();
       if (!filePath) return null;
 
-      const allowed = await window.api.checkPermission?.(filePath);
-      if (!allowed) {
-        await window.api.requestPermission?.('read', filePath);
-      }
+      const allowed = await this.ensurePermission('read', filePath);
+      if (!allowed) return null;
 
       const content = await window.api.readFile(filePath);
-      return { path: filePath, content };
+
+      return {
+        path: filePath,
+        content,
+        name: filePath.split(/[\\/]/).pop()
+      };
     } catch (err) {
       console.error("openFile error:", err);
       return null;
@@ -37,12 +65,11 @@ export const platform = {
         if (!target) return null;
       }
 
-      const allowed = await window.api.checkPermission?.(target);
-      if (!allowed) {
-        await window.api.requestPermission?.('write', target);
-      }
+      const allowed = await this.ensurePermission('write', target);
+      if (!allowed) return null;
 
       await window.api.writeFile(target, content);
+
       return target;
     } catch (err) {
       console.error("saveFile error:", err);
@@ -54,6 +81,9 @@ export const platform = {
     if (!this.isDesktop) return null;
 
     try {
+      const allowed = await this.ensurePermission('read', path);
+      if (!allowed) return null;
+
       return await window.api.readFile(path);
     } catch (err) {
       console.error("readFile error:", err);
@@ -61,11 +91,27 @@ export const platform = {
     }
   },
 
-  // -----------------------------
+  async writeFile(path, data) {
+    if (!this.isDesktop) return false;
+
+    try {
+      const allowed = await this.ensurePermission('write', path);
+      if (!allowed) return false;
+
+      await window.api.writeFile(path, data);
+      return true;
+    } catch (err) {
+      console.error("writeFile error:", err);
+      return false;
+    }
+  },
+
+  // =============================
   // DIRECTORY / FILE TREE
-  // -----------------------------
+  // =============================
   async readDir(path) {
     if (!this.isDesktop) return [];
+
     try {
       return await window.api.readDir(path);
     } catch (err) {
@@ -76,6 +122,7 @@ export const platform = {
 
   async getFileTree(path) {
     if (!this.isDesktop) return [];
+
     try {
       return await window.api.fsTree(path);
     } catch (err) {
@@ -84,12 +131,26 @@ export const platform = {
     }
   },
 
-  // -----------------------------
+  async createFile(path, content = "") {
+    return this.writeFile(path, content);
+  },
+
+  async deleteFile(path) {
+    if (!this.isDesktop) return false;
+
+    try {
+      return await window.api.deleteFile?.(path);
+    } catch {
+      return false;
+    }
+  },
+
+  // =============================
   // STATE (tabs, session, plugins)
-  // -----------------------------
+  // =============================
   async getState(key) {
     if (!this.isDesktop) {
-      return JSON.parse(localStorage.getItem(key) || "null");
+      return this.safeJSONParse(localStorage.getItem(key));
     }
 
     try {
@@ -114,18 +175,11 @@ export const platform = {
     }
   },
 
-  // -----------------------------
+  // =============================
   // PERMISSIONS
-  // -----------------------------
+  // =============================
   async requestPermission(type, path) {
-    if (!this.isDesktop) return true;
-
-    try {
-      return await window.api.requestPermission(type, path);
-    } catch (err) {
-      console.error("requestPermission error:", err);
-      return false;
-    }
+    return this.ensurePermission(type, path);
   },
 
   async checkPermission(path) {
@@ -133,61 +187,75 @@ export const platform = {
 
     try {
       return await window.api.checkPermission(path);
-    } catch (err) {
-      console.error("checkPermission error:", err);
+    } catch {
       return false;
     }
   },
 
-  // -----------------------------
+  // =============================
   // DRAG & DROP SUPPORT
-  // -----------------------------
+  // =============================
   enableDragDrop(callback) {
     if (!this.isDesktop) return;
 
-    document.addEventListener('dragover', (e) => {
-      e.preventDefault();
-    });
-
-    document.addEventListener('drop', async (e) => {
+    const handleDrop = async (e) => {
       e.preventDefault();
 
       for (const file of e.dataTransfer.files) {
         try {
+          const allowed = await this.ensurePermission('read', file.path);
+          if (!allowed) continue;
+
           const content = await window.api.readFile(file.path);
+
           callback({
             path: file.path,
-            content
+            content,
+            name: file.name
           });
         } catch (err) {
           console.error("DragDrop error:", err);
         }
       }
-    });
+    };
+
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop', handleDrop);
+
+    // return cleanup function
+    return () => {
+      document.removeEventListener('drop', handleDrop);
+    };
   },
 
-  // -----------------------------
+  // =============================
   // FILE WATCHER (live updates)
-  // -----------------------------
+  // =============================
   watchFile(path, callback) {
     if (!this.isDesktop) return;
 
     try {
       window.api.watchFile?.(path);
 
-      window.api.onFileChanged?.((changedPath) => {
+      const handler = (changedPath) => {
         if (changedPath === path) {
           callback(changedPath);
         }
-      });
+      };
+
+      window.api.onFileChanged?.(handler);
+
+      return () => {
+        // cleanup not fully supported yet but reserved
+      };
     } catch (err) {
       console.error("watchFile error:", err);
     }
   },
 
-  // -----------------------------
-  // UTIL
-  // -----------------------------
+  // =============================
+  // UTILITIES
+  // =============================
   async exists(path) {
     if (!this.isDesktop) return false;
 
@@ -196,5 +264,13 @@ export const platform = {
     } catch {
       return false;
     }
+  },
+
+  getFileName(path) {
+    return path.split(/[\\/]/).pop();
+  },
+
+  getDirName(path) {
+    return path.split(/[\\/]/).slice(0, -1).join('/');
   }
 };
